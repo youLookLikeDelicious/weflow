@@ -9,7 +9,7 @@ WeFlow 提供本地 HTTP API（已支持GET 和 POST请求），便于外部脚�
 - 默认监听地址：`127.0.0.1`
 - 默认端口：`5031`
 - 基础地址：`http://127.0.0.1:5031`
-- 可选开启 `主动推送`，检测到新收到的消息后会通过 `GET /api/v1/push/messages` 推送给 SSE 订阅端
+- 可选开启 `主动推送`，检测到新收到或自己发出的消息后会通过 `GET /api/v1/push/messages` 推送给 SSE 订阅端
 
 **状态记忆**：API 服务和主动推送的状态及端口会自动保存，重启 WeFlow 后会自动恢复运行。
 
@@ -76,17 +76,21 @@ GET /api/v1/push/messages
 - 响应类型为 `text/event-stream`
 - 事件名包含 `message.new` 和 `message.revoke`
 - 建议接收端按 `event + rawid` 去重
+- `message.new` 包含入站和出站消息，可通过 `isSend` 判断是否自己发送
 
 ### 事件字段
 
 - `event`
 - `sessionId`
+- `sessionType`
 - `rawid`
 - `avatarUrl`
 - `sourceName`
 - `groupName`（仅群聊）
 - `content`
 - `timestamp`（消息时间，秒级 Unix 时间戳）
+- `isSend`（`true` 表示当前微信账号发出）
+- `senderUsername`（消息发送方 wxid，可能为空）
 
 ### 示例
 
@@ -98,7 +102,7 @@ curl -N "http://127.0.0.1:5031/api/v1/push/messages?access_token=YOUR_TOKEN
 
 ```text
 event: message.new
-data: {"event":"message.new","sessionId":"xxx@chatroom","sessionType":"group","rawid":"1234567890123456789","avatarUrl":"https://example.com/group.jpg","sourceName":"李四","groupName":"项目群","content":"[图片]","timestamp":1760000123}
+data: {"event":"message.new","sessionId":"xxx@chatroom","sessionType":"group","rawid":"1234567890123456789","avatarUrl":"https://example.com/group.jpg","sourceName":"李四","groupName":"项目群","content":"[图片]","timestamp":1760000123,"isSend":false,"senderUsername":"wxid_member"}
 ```
 
 撤回事件示例：
