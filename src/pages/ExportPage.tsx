@@ -229,11 +229,12 @@ const defaultTxtColumns = ['index', 'time', 'senderRole', 'messageType', 'conten
 const DETAIL_PRECISE_REFRESH_COOLDOWN_MS = 10 * 60 * 1000
 const TASK_PERFORMANCE_UPDATE_MIN_INTERVAL_MS = 900
 const EXPORT_PROGRESS_UI_FLUSH_INTERVAL_MS = 320
-const SESSION_MEDIA_METRIC_PREFETCH_ROWS = 10
-const SESSION_MEDIA_METRIC_BATCH_SIZE = 8
-const SESSION_MEDIA_METRIC_BACKGROUND_FEED_SIZE = 48
-const SESSION_MEDIA_METRIC_BACKGROUND_FEED_INTERVAL_MS = 120
+const SESSION_MEDIA_METRIC_PREFETCH_ROWS = 4
+const SESSION_MEDIA_METRIC_BATCH_SIZE = 4
+const SESSION_MEDIA_METRIC_BACKGROUND_FEED_SIZE = 12
+const SESSION_MEDIA_METRIC_BACKGROUND_FEED_INTERVAL_MS = 400
 const SESSION_MEDIA_METRIC_CACHE_FLUSH_DELAY_MS = 1200
+const EXPORT_EAGER_BACKGROUND_STATS = false
 const SNS_USER_POST_COUNT_BATCH_SIZE = 12
 const SNS_USER_POST_COUNT_BATCH_INTERVAL_MS = 120
 const SNS_RANK_PAGE_SIZE = 50
@@ -6696,6 +6697,8 @@ function ExportPage() {
     return map
   }, [sessions])
 
+  const messageCountSortMap = contactsSortConfig.key === 'messageCount' ? sessionMessageCounts : null
+
   const filteredContacts = useMemo(() => {
     const keyword = searchKeyword.trim().toLowerCase()
     const contacts = contactsList
@@ -6713,7 +6716,9 @@ function ExportPage() {
 
     const indexedContacts = contacts.map((contact, index) => {
       const sessionRow = sessionRowByUsername.get(contact.username)
-      const counted = normalizeMessageCount(sessionMessageCounts[contact.username])
+      const counted = messageCountSortMap
+        ? normalizeMessageCount(messageCountSortMap[contact.username])
+        : undefined
       const hinted = normalizeMessageCount(sessionRow?.messageCountHint)
       const count = typeof counted === 'number' ? counted : hinted
       const rowTs = sessionRow?.lastTimestamp || sessionRow?.sortTimestamp
@@ -6744,14 +6749,14 @@ function ExportPage() {
         const diff = compareNullable(a.count, b.count, sortOrder)
         if (diff !== 0) return diff
       } else {
-        const diff = compareNullable(a.count, b.count, 'desc')
+        const diff = compareNullable(a.latestTime, b.latestTime, 'desc')
         if (diff !== 0) return diff
       }
       return a.index - b.index
     })
 
     return indexedContacts.map(item => item.contact)
-  }, [contactsList, activeTab, searchKeyword, sessionMessageCounts, sessionRowByUsername, contactsSortConfig])
+  }, [contactsList, activeTab, searchKeyword, messageCountSortMap, sessionRowByUsername, contactsSortConfig])
 
   const keywordMatchedContactUsernameSet = useMemo(() => {
     const keyword = searchKeyword.trim().toLowerCase()
@@ -7059,6 +7064,15 @@ function ExportPage() {
       sessionMediaMetricBackgroundFeedTimerRef.current = null
     }
 
+    if (!EXPORT_EAGER_BACKGROUND_STATS) {
+      return () => {
+        if (sessionMediaMetricBackgroundFeedTimerRef.current) {
+          window.clearTimeout(sessionMediaMetricBackgroundFeedTimerRef.current)
+          sessionMediaMetricBackgroundFeedTimerRef.current = null
+        }
+      }
+    }
+
     const visibleTargetSet = new Set(visibleTargets)
     let cursor = 0
     const feedNext = () => {
@@ -7101,6 +7115,7 @@ function ExportPage() {
   ])
 
   useEffect(() => {
+    if (!EXPORT_EAGER_BACKGROUND_STATS) return
     if (activeTaskCount > 0) return
     const runId = sessionMediaMetricRunIdRef.current
     const allTargets = [
@@ -7158,6 +7173,15 @@ function ExportPage() {
     if (sessionMutualFriendsBackgroundFeedTimerRef.current) {
       window.clearTimeout(sessionMutualFriendsBackgroundFeedTimerRef.current)
       sessionMutualFriendsBackgroundFeedTimerRef.current = null
+    }
+
+    if (!EXPORT_EAGER_BACKGROUND_STATS) {
+      return () => {
+        if (sessionMutualFriendsBackgroundFeedTimerRef.current) {
+          window.clearTimeout(sessionMutualFriendsBackgroundFeedTimerRef.current)
+          sessionMutualFriendsBackgroundFeedTimerRef.current = null
+        }
+      }
     }
 
     const visibleTargetSet = new Set(visibleTargets)
