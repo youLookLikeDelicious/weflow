@@ -37,6 +37,8 @@ interface MessagePushPayload {
   groupName?: string
   content: string | null
   timestamp: number
+  isSend?: boolean
+  senderUsername?: string
 }
 
 const PUSH_CONFIG_KEYS = new Set([
@@ -467,9 +469,10 @@ class MessagePushService {
         }
         continue
       }
-      if (message.isSend === 1) continue
       if (previous && !seenPrimed && createTime === previousTimestamp) {
         if (revokeMessage) {
+          candidateMessages.push(message)
+        } else if (message.isSend === 1) {
           candidateMessages.push(message)
         } else {
           sameTimestampIncoming.push(message)
@@ -482,7 +485,7 @@ class MessagePushService {
 
     const futureIncomingCount = candidateMessages.filter((message) => {
       const createTime = Number(message.createTime || 0)
-      return !previous || createTime > previousTimestamp || seenPrimed
+      return message.isSend !== 1 && (!previous || createTime > previousTimestamp || seenPrimed)
     }).length
     const sameTimestampAllowance = previous && !seenPrimed
       ? Math.max(0, expectedIncomingCount - futureIncomingCount)
@@ -716,6 +719,8 @@ class MessagePushService {
     const rawid = this.getMessageRawId(message)
 
     const createTime = Number(message.createTime || 0)
+    const isSend = message.isSend === 1
+    const senderUsername = String(message.senderUsername || '').trim() || undefined
 
     if (isGroup) {
       const groupInfo = await chatService.getContactAvatar(sessionId)
@@ -731,7 +736,9 @@ class MessagePushService {
         groupName,
         sourceName,
         content,
-        timestamp: createTime
+        timestamp: createTime,
+        isSend,
+        senderUsername
       }
     }
 
@@ -745,7 +752,9 @@ class MessagePushService {
       avatarUrl,
       sourceName: session.displayName || contactInfo?.displayName || sessionId,
       content,
-      timestamp: createTime
+      timestamp: createTime,
+      isSend,
+      senderUsername
     }
   }
 
