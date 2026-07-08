@@ -81,6 +81,13 @@ interface ApiMediaOptions {
   exportEmojis: boolean
 }
 
+const API_MESSAGES_DEFAULT_LIMIT = 100
+const API_MESSAGES_MAX_LIMIT = 100
+const API_MESSAGES_MEDIA_MAX_LIMIT = 20
+const API_MESSAGES_MIN_BATCH_SIZE = 50
+const API_MESSAGES_MAX_BATCH_SIZE = 200
+const API_SLOW_REQUEST_WARNING_MS = 2000
+
 type MediaKind = 'image' | 'voice' | 'video' | 'emoji'
 type ApiSessionType = 'group' | 'private' | 'channel' | 'other'
 
@@ -609,8 +616,7 @@ class HttpService {
     useLiteMapping: boolean = true
   ): Promise<{ success: boolean; messages?: Message[]; hasMore?: boolean; error?: string }> {
     try {
-      // 深分页时放大 batch，避免 offset 很大时出现大量小批次循环。
-      const batchSize = Math.min(2000, Math.max(500, limit))
+      const batchSize = Math.min(API_MESSAGES_MAX_BATCH_SIZE, Math.max(API_MESSAGES_MIN_BATCH_SIZE, limit))
       const beginTimestamp = startTime > 10000000000 ? Math.floor(startTime / 1000) : startTime
       const endTimestamp = endTime > 10000000000 ? Math.floor(endTime / 1000) : endTime
 
@@ -808,8 +814,8 @@ class HttpService {
   }
 
   private async handleMessages(url: URL, res: http.ServerResponse): Promise<void> {
+    const startedAt = Date.now()
     const talker = (url.searchParams.get('talker') || '').trim()
-    const limit = this.parseIntParam(url.searchParams.get('limit'), 100, 1, 10000)
     const offset = this.parseIntParam(url.searchParams.get('offset'), 0, 0, Number.MAX_SAFE_INTEGER)
     const keyword = (url.searchParams.get('keyword') || '').trim()
     const startParam = url.searchParams.get('start')
@@ -818,6 +824,8 @@ class HttpService {
     const formatParam = (url.searchParams.get('format') || '').trim().toLowerCase()
     const format = formatParam || (chatlab ? 'chatlab' : 'json')
     const mediaOptions = this.parseMediaOptions(url)
+    const maxLimit = mediaOptions.enabled ? API_MESSAGES_MEDIA_MAX_LIMIT : API_MESSAGES_MAX_LIMIT
+    const limit = this.parseIntParam(url.searchParams.get('limit'), API_MESSAGES_DEFAULT_LIMIT, 1, maxLimit)
 
     if (!talker) {
       this.sendError(res, 400, 'Missing required parameter: talker')
@@ -885,6 +893,14 @@ class HttpService {
           count: mediaMap.size
         }
       })
+      this.logSlowApiRequest('/api/v1/messages', startedAt, {
+        talker,
+        limit,
+        media: mediaOptions.enabled,
+        count: messages.length,
+        mediaCount: mediaMap.size,
+        format
+      })
       return
     }
 
@@ -900,6 +916,24 @@ class HttpService {
         count: mediaMap.size
       },
       messages: apiMessages
+    })
+    this.logSlowApiRequest('/api/v1/messages', startedAt, {
+      talker,
+      limit,
+      media: mediaOptions.enabled,
+      count: apiMessages.length,
+      mediaCount: mediaMap.size,
+      format
+    })
+  }
+
+  private logSlowApiRequest(endpoint: string, startedAt: number, details: Record<string, unknown>): void {
+    const durationMs = Date.now() - startedAt
+    if (durationMs < API_SLOW_REQUEST_WARNING_MS) return
+    console.warn('[HttpService] Slow request:', {
+      endpoint,
+      durationMs,
+      ...details
     })
   }
 

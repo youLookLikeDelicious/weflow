@@ -60,8 +60,9 @@ class MessagePushService {
   private readonly groupNicknameCache = new Map<string, { nicknames: Record<string, string>; updatedAt: number }>()
   private readonly pushAvatarCacheDir: string
   private readonly pushAvatarDataCache = new Map<string, string>()
-  private readonly debounceMs = 350
+  private readonly debounceMs = 1000
   private readonly lookbackSeconds = 2
+  private readonly newMessageFetchLimit = 100
   private readonly recentMessageTtlMs = 10 * 60 * 1000
   private readonly groupNicknameCacheTtlMs = 5 * 60 * 1000
   private readonly messageTableRescanDelayMs = 500
@@ -415,7 +416,7 @@ class MessagePushService {
     const since = previous
       ? Math.max(0, previousTimestamp - this.lookbackSeconds)
       : 0
-    const newMessagesResult = await chatService.getNewMessages(session.username, since, 1000)
+    const newMessagesResult = await chatService.getNewMessages(session.username, since, this.newMessageFetchLimit)
     const fetchedMessages = newMessagesResult.success && Array.isArray(newMessagesResult.messages)
       ? newMessagesResult.messages
       : []

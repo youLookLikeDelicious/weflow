@@ -131,7 +131,7 @@ GET /api/v1/messages
 | 参数      | 类型   | 必填 | 说明                                                  |
 | --------- | ------ | ---- | ----------------------------------------------------- |
 | `talker`  | string | 是   | 会话 ID。私聊通常是对方 `wxid`，群聊是 `xxx@chatroom` |
-| `limit`   | number | 否   | 返回条数，默认 `100`，范围 `1~10000`                  |
+| `limit`   | number | 否   | 返回条数，默认 `100`；普通请求最大 `100`，`media=1` 时最大 `20` |
 | `offset`  | number | 否   | 分页偏移，默认 `0`                                    |
 | `start`   | string | 否   | 开始时间，支持 `YYYYMMDD` 或时间戳                    |
 | `end`     | string | 否   | 结束时间，支持 `YYYYMMDD` 或时间戳                    |
