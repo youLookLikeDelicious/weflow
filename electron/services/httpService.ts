@@ -14,6 +14,7 @@ import { videoService } from './videoService'
 import { imageDecryptService } from './imageDecryptService'
 import { groupAnalyticsService } from './groupAnalyticsService'
 import { snsService } from './snsService'
+import { apiMediaJobService, type ApiMediaJobRecord, type ApiMediaKind } from './apiMediaJobService'
 
 // ChatLab 格式定义
 interface ChatLabHeader {
@@ -98,6 +99,11 @@ interface ApiExportedMedia {
   relativePath: string
 }
 
+interface ApiResolvedMedia {
+  mediaMap: Map<number, ApiExportedMedia>
+  jobMap: Map<number, ApiMediaJobRecord>
+}
+
 interface MessagePushReplayEvent {
   id: number
   body: string
@@ -139,8 +145,14 @@ class HttpService {
   private messagePushHeartbeatTimer: ReturnType<typeof setInterval> | null = null
   private connectionMutex: boolean = false
   private messagePushEventId = 0
+  private mediaJobWorkerRunning = false
+  private mediaJobWorkerStopped = false
+  private activeMediaJobTalkers = new Set<string>()
   private readonly messagePushReplayLimit = 1000
   private readonly messagePushReplayTtlMs = 10 * 60 * 1000
+  private readonly mediaJobWorkerConcurrency = 2
+  private readonly mediaJobWorkerDelayMs = 10
+  private readonly mediaJobMaxAttempts = 3
 
   constructor() {
     this.configService = ConfigService.getInstance()
@@ -191,7 +203,10 @@ class HttpService {
 
       this.server.listen(this.port, this.host, () => {
         this.running = true
+        this.mediaJobWorkerStopped = false
+        apiMediaJobService.recoverProcessingJobs()
         this.startMessagePushHeartbeat()
+        this.scheduleMediaJobWorker()
         console.log(`[HttpService] HTTP API server started on http://${this.host}:${this.port}`)
         resolve({ success: true, port: this.port })
       })
@@ -215,6 +230,9 @@ class HttpService {
           clearInterval(this.messagePushHeartbeatTimer)
           this.messagePushHeartbeatTimer = null
         }
+        this.mediaJobWorkerStopped = true
+        this.activeMediaJobTalkers.clear()
+        apiMediaJobService.close()
         // 使用互斥锁保护连接集合操作
         this.connectionMutex = true
         const socketsToClose = Array.from(this.connections)
@@ -471,6 +489,12 @@ class HttpService {
                 await this.handleContacts(url, res)
             } else if (pathname === '/api/v1/group-members') {
                 await this.handleGroupMembers(url, res)
+            } else if (pathname === '/api/v1/media-jobs') {
+                if (req.method !== 'GET') return this.sendMethodNotAllowed(res, 'GET')
+                await this.handleMediaJobs(url, res)
+            } else if (pathname.startsWith('/api/v1/media-jobs/')) {
+                if (req.method !== 'GET') return this.sendMethodNotAllowed(res, 'GET')
+                await this.handleMediaJob(pathname, res)
             } else if (pathname === '/api/v1/sns/timeline') {
                 if (req.method !== 'GET') return this.sendMethodNotAllowed(res, 'GET')
                 await this.handleSnsTimeline(url, res)
@@ -876,9 +900,10 @@ class HttpService {
       hasMore = result.hasMore === true
     }
 
-    const mediaMap = mediaOptions.enabled
-      ? await this.exportMediaForMessages(messages, talker, mediaOptions)
-      : new Map<number, ApiExportedMedia>()
+    const resolvedMedia = mediaOptions.enabled
+      ? await this.resolveMediaForMessages(messages, talker, mediaOptions)
+      : { mediaMap: new Map<number, ApiExportedMedia>(), jobMap: new Map<number, ApiMediaJobRecord>() }
+    const mediaMap = resolvedMedia.mediaMap
 
     const displayNames = await this.getDisplayNames([talker])
     const talkerName = displayNames[talker] || talker
@@ -889,8 +914,10 @@ class HttpService {
         ...chatLabData,
         media: {
           enabled: mediaOptions.enabled,
+          mode: mediaOptions.enabled ? 'async-job' : 'disabled',
           exportPath: this.getApiMediaExportPath(),
-          count: mediaMap.size
+          count: mediaMap.size,
+          pending: Array.from(resolvedMedia.jobMap.values()).filter((job) => job.status === 'queued' || job.status === 'processing').length
         }
       })
       this.logSlowApiRequest('/api/v1/messages', startedAt, {
@@ -899,12 +926,13 @@ class HttpService {
         media: mediaOptions.enabled,
         count: messages.length,
         mediaCount: mediaMap.size,
+        mediaJobs: resolvedMedia.jobMap.size,
         format
       })
       return
     }
 
-    const apiMessages = messages.map((msg) => this.toApiMessage(msg, mediaMap.get(msg.localId)))
+    const apiMessages = messages.map((msg) => this.toApiMessage(msg, mediaMap.get(msg.localId), resolvedMedia.jobMap.get(msg.localId)))
     this.sendJson(res, {
       success: true,
       talker,
@@ -912,8 +940,10 @@ class HttpService {
       hasMore,
       media: {
         enabled: mediaOptions.enabled,
+        mode: mediaOptions.enabled ? 'async-job' : 'disabled',
         exportPath: this.getApiMediaExportPath(),
-        count: mediaMap.size
+        count: mediaMap.size,
+        pending: Array.from(resolvedMedia.jobMap.values()).filter((job) => job.status === 'queued' || job.status === 'processing').length
       },
       messages: apiMessages
     })
@@ -923,6 +953,7 @@ class HttpService {
       media: mediaOptions.enabled,
       count: apiMessages.length,
       mediaCount: mediaMap.size,
+      mediaJobs: resolvedMedia.jobMap.size,
       format
     })
   }
@@ -1126,6 +1157,43 @@ class HttpService {
     } catch (error) {
       this.sendError(res, 500, String(error))
     }
+  }
+
+  private async handleMediaJob(pathname: string, res: http.ServerResponse): Promise<void> {
+    const id = decodeURIComponent(pathname.replace('/api/v1/media-jobs/', '')).trim()
+    if (!id) {
+      this.sendError(res, 400, 'Missing media job id')
+      return
+    }
+
+    const job = apiMediaJobService.getJob(id)
+    if (!job) {
+      this.sendError(res, 404, 'Media job not found')
+      return
+    }
+
+    this.sendJson(res, {
+      success: true,
+      job: this.toApiMediaJob(job)
+    })
+  }
+
+  private async handleMediaJobs(url: URL, res: http.ServerResponse): Promise<void> {
+    const status = (url.searchParams.get('status') || 'ready').trim().toLowerCase()
+    if (!['queued', 'processing', 'ready', 'missing', 'failed'].includes(status)) {
+      this.sendError(res, 400, 'Invalid status')
+      return
+    }
+
+    const since = this.parseIntParam(url.searchParams.get('since'), 0, 0, Number.MAX_SAFE_INTEGER)
+    const limit = this.parseIntParam(url.searchParams.get('limit'), 100, 1, 100)
+    const jobs = apiMediaJobService.listJobs(status, since, limit)
+
+    this.sendJson(res, {
+      success: true,
+      count: jobs.length,
+      jobs: jobs.map((job) => this.toApiMediaJob(job))
+    })
   }
 
   private async handleSnsTimeline(url: URL, res: http.ServerResponse): Promise<void> {
@@ -1479,6 +1547,151 @@ class HttpService {
     fs.writeFileSync(fullPath, data)
   }
 
+  private async resolveMediaForMessages(
+    messages: Message[],
+    talker: string,
+    options: ApiMediaOptions
+  ): Promise<ApiResolvedMedia> {
+    const mediaMap = new Map<number, ApiExportedMedia>()
+    const jobMap = new Map<number, ApiMediaJobRecord>()
+    if (!options.enabled || messages.length === 0) {
+      return { mediaMap, jobMap }
+    }
+
+    for (const msg of messages) {
+      const mediaKind = this.getMessageMediaKind(msg, options)
+      if (!mediaKind) continue
+
+      const job = apiMediaJobService.getOrCreateJob({
+        sourceId: this.getApiMediaSourceId(),
+        talker,
+        message: msg,
+        mediaKind
+      })
+      if (!job) continue
+
+      jobMap.set(msg.localId, job)
+      const exported = this.toExportedMediaFromJob(job)
+      if (exported) {
+        mediaMap.set(msg.localId, exported)
+      } else if (job.status === 'queued' || job.status === 'failed') {
+        this.scheduleMediaJobWorker()
+      }
+    }
+
+    return { mediaMap, jobMap }
+  }
+
+  private getApiMediaSourceId(): string {
+    return this.configService.getMyWxidCleaned() || 'default'
+  }
+
+  private getMessageMediaKind(msg: Message, options: ApiMediaOptions): ApiMediaKind | null {
+    if (!options.enabled) return null
+    if (msg.localType === 3 && options.exportImages) return 'image'
+    if (msg.localType === 34 && options.exportVoices) return 'voice'
+    if (msg.localType === 43 && options.exportVideos && msg.videoMd5) return 'video'
+    if (msg.localType === 47 && options.exportEmojis && msg.emojiCdnUrl) return 'emoji'
+    return null
+  }
+
+  private toExportedMediaFromJob(job: ApiMediaJobRecord): ApiExportedMedia | null {
+    if (job.status !== 'ready' || !job.outputRelativePath) return null
+    const mediaBasePath = path.resolve(this.getApiMediaExportPath())
+    const fullPath = path.resolve(mediaBasePath, job.outputRelativePath)
+    if (!fullPath.startsWith(mediaBasePath + path.sep) && fullPath !== mediaBasePath) return null
+    if (!fs.existsSync(fullPath)) return null
+
+    return {
+      kind: job.mediaKind,
+      fileName: path.basename(fullPath),
+      fullPath,
+      relativePath: job.outputRelativePath
+    }
+  }
+
+  private toApiMediaJob(job: ApiMediaJobRecord): Record<string, unknown> {
+    const exported = this.toExportedMediaFromJob(job)
+    return {
+      id: job.id,
+      sourceId: job.sourceId,
+      talker: job.talker,
+      localId: job.localId,
+      serverId: job.serverId || undefined,
+      localType: job.localType,
+      createTime: job.createTime,
+      mediaKind: job.mediaKind,
+      status: exported ? 'ready' : job.status,
+      mediaUrl: exported ? `http://${this.host}:${this.port}/api/v1/media/${exported.relativePath}` : undefined,
+      missingReason: job.missingReason || undefined,
+      lastError: job.lastError || undefined,
+      attempts: job.attempts,
+      updatedAt: job.updatedAt
+    }
+  }
+
+  private scheduleMediaJobWorker(): void {
+    if (this.mediaJobWorkerStopped || this.mediaJobWorkerRunning) return
+    this.mediaJobWorkerRunning = true
+    setImmediate(() => {
+      void this.runMediaJobWorker()
+    })
+  }
+
+  private async runMediaJobWorker(): Promise<void> {
+    try {
+      while (!this.mediaJobWorkerStopped) {
+        const capacity = Math.max(0, this.mediaJobWorkerConcurrency - this.activeMediaJobTalkers.size)
+        if (capacity <= 0) break
+
+        const jobs = apiMediaJobService.claimNextJobs(
+          capacity,
+          new Set(this.activeMediaJobTalkers),
+          this.mediaJobMaxAttempts
+        )
+        if (jobs.length === 0) break
+
+        await Promise.all(jobs.map((job) => this.runMediaJob(job)))
+        await new Promise((resolve) => setTimeout(resolve, this.mediaJobWorkerDelayMs))
+      }
+    } finally {
+      this.mediaJobWorkerRunning = false
+    }
+  }
+
+  private async runMediaJob(job: ApiMediaJobRecord): Promise<void> {
+    this.activeMediaJobTalkers.add(job.talker)
+    try {
+      const msg = JSON.parse(job.payloadJson || '{}') as Message
+      const sessionDir = path.join(this.getApiMediaExportPath(), this.sanitizeFileName(job.talker, 'session'))
+      this.ensureDir(sessionDir)
+      const exported = await this.exportMediaForMessage(
+        msg,
+        job.talker,
+        sessionDir,
+        {
+          enabled: true,
+          exportImages: job.mediaKind === 'image',
+          exportVoices: job.mediaKind === 'voice',
+          exportVideos: job.mediaKind === 'video',
+          exportEmojis: job.mediaKind === 'emoji'
+        }
+      )
+
+      if (this.mediaJobWorkerStopped) return
+      if (exported) {
+        apiMediaJobService.markReady(job.id, exported.relativePath)
+      } else {
+        apiMediaJobService.markMissing(job.id, 'source_not_found')
+      }
+    } catch (error) {
+      if (this.mediaJobWorkerStopped) return
+      apiMediaJobService.markFailed(job.id, String(error), this.mediaJobMaxAttempts)
+    } finally {
+      this.activeMediaJobTalkers.delete(job.talker)
+    }
+  }
+
   private async exportMediaForMessages(
     messages: Message[],
     talker: string,
@@ -1656,9 +1869,14 @@ class HttpService {
     return null
   }
 
-  private toApiMessage(msg: Message, media?: ApiExportedMedia): Record<string, any> {
+  private toApiMessage(msg: Message, media?: ApiExportedMedia, mediaJob?: ApiMediaJobRecord): Record<string, any> {
     const serverId = this.getMessageServerId(msg)
     const quoteInfo = this.extractApiQuoteInfo(msg)
+    const mediaStatus = media
+      ? 'ready'
+      : mediaJob
+        ? mediaJob.status
+        : undefined
     const apiMessage: Record<string, any> = {
       localId: msg.localId,
       serverId: serverId || '0',
@@ -1670,7 +1888,11 @@ class HttpService {
       content: this.getMessageContent(msg, quoteInfo),
       rawContent: msg.rawContent,
       parsedContent: msg.parsedContent,
-      mediaType: media?.kind,
+      mediaType: media?.kind || mediaJob?.mediaKind,
+      mediaJobId: mediaJob?.id,
+      mediaStatus,
+      missingReason: mediaJob?.missingReason || undefined,
+      lastMediaError: mediaJob?.lastError || undefined,
       mediaFileName: media?.fileName,
       mediaUrl: media ? `http://${this.host}:${this.port}/api/v1/media/${media.relativePath}` : undefined,
       mediaLocalPath: media?.fullPath

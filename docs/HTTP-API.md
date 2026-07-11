@@ -180,9 +180,15 @@ curl "http://127.0.0.1:5031/api/v1/messages?talker=xxx@chatroom&media=1&image=1&
 - `replyToMessageId`（引用回复目标消息的 `serverId`，仅引用消息返回）
 - `quote`（引用消息快照，包含被引用消息的 ID、发送者、内容和类型）
 - `mediaType`
+- `mediaJobId`
+- `mediaStatus`（`queued`、`processing`、`ready`、`missing`、`failed`；仅 `media=1` 且该消息有媒体任务时返回）
+- `missingReason`
+- `lastMediaError`
 - `mediaFileName`
 - `mediaUrl`
 - `mediaLocalPath`
+
+> `media=1` 不会在请求链路内解密或复制媒体文件。接口只返回已由后台任务处理完成的媒体；未完成的媒体会返回 `mediaJobId` + `mediaStatus`，接收端应先同步消息，再通过媒体任务接口补齐媒体。
 
 **示例响应**
 
@@ -194,8 +200,10 @@ curl "http://127.0.0.1:5031/api/v1/messages?talker=xxx@chatroom&media=1&image=1&
   "hasMore": true,
   "media": {
     "enabled": true,
+    "mode": "async-job",
     "exportPath": "C:\\Users\\Alice\\Documents\\WeFlow\\api-media",
-    "count": 1
+    "count": 1,
+    "pending": 1
   },
   "messages": [
     {
@@ -236,13 +244,52 @@ curl "http://127.0.0.1:5031/api/v1/messages?talker=xxx@chatroom&media=1&image=1&
       "senderUsername": "wxid_member",
       "content": "[图片]",
       "mediaType": "image",
+      "mediaJobId": "9d7a21f8e3...",
+      "mediaStatus": "ready",
       "mediaFileName": "abc123.jpg",
       "mediaUrl": "http://127.0.0.1:5031/api/v1/media/xxx@chatroom/images/abc123.jpg",
       "mediaLocalPath": "C:\\Users\\Alice\\Documents\\WeFlow\\api-media\\xxx@chatroom\\images\\abc123.jpg"
+    },
+    {
+      "localId": 126,
+      "localType": 3,
+      "createTime": 1738713720,
+      "isSend": 0,
+      "senderUsername": "wxid_member",
+      "content": "[图片]",
+      "mediaType": "image",
+      "mediaJobId": "31c42d9a12...",
+      "mediaStatus": "queued"
     }
   ]
 }
 ```
+
+### 媒体任务查询
+
+当消息返回 `mediaJobId` 且 `mediaStatus` 不是 `ready` 时，可用以下接口查询后台媒体处理结果。
+
+```http
+GET /api/v1/media-jobs/{id}
+GET /api/v1/media-jobs?status=ready&since=1738713600&limit=100
+```
+
+任务响应字段：
+
+- `id`
+- `sourceId`
+- `talker`
+- `localId`
+- `serverId`
+- `localType`
+- `createTime`
+- `mediaKind`
+- `status`
+- `mediaUrl`（仅 ready）
+- `missingReason`
+- `lastError`
+- `attempts`
+- `updatedAt`
 
 ### ChatLab 响应
 

@@ -58,6 +58,9 @@ class MessagePushService {
   private readonly recentlyRevokedOriginalTokens = new Map<string, number>()
   private readonly seenPrimedSessions = new Set<string>()
   private readonly groupNicknameCache = new Map<string, { nicknames: Record<string, string>; updatedAt: number }>()
+  private readonly sessionSnapshot = new Map<string, ChatSession>()
+  private readonly messageTableFullHashLookup = new Map<string, string>()
+  private readonly messageTableShortHashLookup = new Map<string, string | null>()
   private readonly pushAvatarCacheDir: string
   private readonly pushAvatarDataCache = new Map<string, string>()
   private readonly debounceMs = 1000
@@ -68,6 +71,8 @@ class MessagePushService {
   private readonly messageTableRescanDelayMs = 500
   private readonly recentRevokeScanSeconds = 150
   private readonly directRevokeScanLimit = 20
+  private readonly maxCachedMessageTableCandidates = 20
+  private readonly sessionSnapshotTtlMs = 5 * 60 * 1000
   private debounceTimer: ReturnType<typeof setTimeout> | null = null
   private messageTableRescanTimer: ReturnType<typeof setTimeout> | null = null
   private processing = false
@@ -75,6 +80,7 @@ class MessagePushService {
   private started = false
   private baselineReady = false
   private messageTableScanRequested = false
+  private sessionSnapshotUpdatedAt = 0
   private readonly pendingMessageTableNames = new Set<string>()
 
   constructor() {
@@ -152,6 +158,10 @@ class MessagePushService {
     this.recentlyRevokedOriginalTokens.clear()
     this.seenPrimedSessions.clear()
     this.groupNicknameCache.clear()
+    this.sessionSnapshot.clear()
+    this.messageTableFullHashLookup.clear()
+    this.messageTableShortHashLookup.clear()
+    this.sessionSnapshotUpdatedAt = 0
     this.baselineReady = false
     this.messageTableScanRequested = false
     this.pendingMessageTableNames.clear()
@@ -185,7 +195,9 @@ class MessagePushService {
     if (!sessionsResult.success || !sessionsResult.sessions) {
       return
     }
-    this.setBaseline(sessionsResult.sessions as ChatSession[])
+    const sessions = sessionsResult.sessions as ChatSession[]
+    this.updateSessionSnapshot(sessions)
+    this.setBaseline(sessions)
     this.baselineReady = true
   }
 
@@ -244,12 +256,36 @@ class MessagePushService {
         return
       }
 
+      const cachedMessageTableSessions = this.resolveCachedMessageTableSessions(pendingMessageTableNames)
+      if (
+        this.baselineReady &&
+        pendingMessageTableNames.length > 0 &&
+        cachedMessageTableSessions.length > 0 &&
+        !this.isSessionSnapshotStale()
+      ) {
+        const previousBaseline = new Map(this.sessionBaseline)
+        const candidates = cachedMessageTableSessions.slice(0, this.maxCachedMessageTableCandidates)
+        for (const session of candidates) {
+          const previous = previousBaseline.get(session.username) || this.sessionBaseline.get(session.username)
+          const result = await this.pushSessionMessages(session, previous, { scanRecentRevokes: true })
+          this.updateInspectedBaseline(session, previousBaseline.get(session.username), result)
+          if (result.retry) {
+            this.rerunRequested = true
+          }
+        }
+        if (cachedMessageTableSessions.length > candidates.length) {
+          this.rerunRequested = true
+        }
+        return
+      }
+
       const sessionsResult = await chatService.getSessions()
       if (!sessionsResult.success || !sessionsResult.sessions) {
         return
       }
 
       const sessions = sessionsResult.sessions as ChatSession[]
+      this.updateSessionSnapshot(sessions)
       if (!this.baselineReady) {
         this.setBaseline(sessions)
         this.baselineReady = true
@@ -322,6 +358,55 @@ class MessagePushService {
     for (const [username, baseline] of nextBaseline.entries()) {
       this.sessionBaseline.set(username, baseline)
     }
+  }
+
+  private updateSessionSnapshot(sessions: ChatSession[]): void {
+    this.sessionSnapshot.clear()
+    this.messageTableFullHashLookup.clear()
+    this.messageTableShortHashLookup.clear()
+
+    for (const session of sessions) {
+      const sessionId = String(session.username || '').trim()
+      if (!sessionId) continue
+      this.sessionSnapshot.set(sessionId, session)
+
+      const fullHash = createHash('md5').update(sessionId).digest('hex').toLowerCase()
+      this.messageTableFullHashLookup.set(fullHash, sessionId)
+
+      const shortHash = fullHash.slice(0, 16)
+      const existing = this.messageTableShortHashLookup.get(shortHash)
+      if (existing === undefined) {
+        this.messageTableShortHashLookup.set(shortHash, sessionId)
+      } else if (existing !== sessionId) {
+        this.messageTableShortHashLookup.set(shortHash, null)
+      }
+    }
+
+    this.sessionSnapshotUpdatedAt = Date.now()
+  }
+
+  private isSessionSnapshotStale(): boolean {
+    if (this.sessionSnapshot.size === 0 || this.sessionSnapshotUpdatedAt <= 0) return true
+    return Date.now() - this.sessionSnapshotUpdatedAt > this.sessionSnapshotTtlMs
+  }
+
+  private resolveCachedMessageTableSessions(tableNames: string[]): ChatSession[] {
+    const sessionIds = new Set<string>()
+    for (const tableName of tableNames) {
+      const sessionId = this.matchSessionIdByMessageTableName(
+        tableName,
+        this.messageTableFullHashLookup,
+        this.messageTableShortHashLookup
+      )
+      if (sessionId) sessionIds.add(sessionId)
+    }
+
+    const sessions: ChatSession[] = []
+    for (const sessionId of sessionIds) {
+      const session = this.sessionSnapshot.get(sessionId)
+      if (session) sessions.push(session)
+    }
+    return sessions
   }
 
   private updateObservedBaseline(session: ChatSession, previous: SessionBaseline | undefined): void {
