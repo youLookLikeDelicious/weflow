@@ -7,7 +7,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { URL } from 'url'
 import { timingSafeEqual } from 'crypto'
-import { chatService, Message } from './chatService'
+import { chatService, Message, type ChatSession, type ContactInfo } from './chatService'
 import { wcdbService } from './wcdbService'
 import { ConfigService } from './config'
 import { videoService } from './videoService'
@@ -15,6 +15,7 @@ import { imageDecryptService } from './imageDecryptService'
 import { groupAnalyticsService } from './groupAnalyticsService'
 import { snsService } from './snsService'
 import { apiMediaJobService, type ApiMediaJobRecord, type ApiMediaKind } from './apiMediaJobService'
+import { API_ENTITY_PAGE_MAX_LIMIT, paginateApiItems } from './apiPagination'
 
 // ChatLab 格式定义
 interface ChatLabHeader {
@@ -153,6 +154,9 @@ class HttpService {
   private readonly mediaJobWorkerConcurrency = 2
   private readonly mediaJobWorkerDelayMs = 10
   private readonly mediaJobMaxAttempts = 3
+  private readonly entitySnapshotTtlMs = 60 * 1000
+  private sessionSnapshot: { items: ChatSession[]; updatedAt: number } | null = null
+  private contactSnapshot: { items: ContactInfo[]; updatedAt: number } | null = null
 
   constructor() {
     this.configService = ConfigService.getInstance()
@@ -974,29 +978,40 @@ class HttpService {
    */
   private async handleSessions(url: URL, res: http.ServerResponse): Promise<void> {
     const keyword = (url.searchParams.get('keyword') || '').trim()
-    const limit = this.parseIntParam(url.searchParams.get('limit'), 100, 1, 10000)
+    const limit = this.parseIntParam(url.searchParams.get('limit'), API_ENTITY_PAGE_MAX_LIMIT, 1, API_ENTITY_PAGE_MAX_LIMIT)
+    const offset = this.parseIntParam(url.searchParams.get('offset'), 0, 0, Number.MAX_SAFE_INTEGER)
     const format = (url.searchParams.get('format') || '').trim().toLowerCase()
 
     try {
-      const sessions = await chatService.getSessions()
-      if (!sessions.success || !sessions.sessions) {
-        this.sendError(res, 500, sessions.error || 'Failed to get sessions')
-        return
+      if (!this.sessionSnapshot || Date.now() - this.sessionSnapshot.updatedAt > this.entitySnapshotTtlMs) {
+        const sessions = await chatService.getSessions()
+        if (!sessions.success || !sessions.sessions) {
+          this.sendError(res, 500, sessions.error || 'Failed to get sessions')
+          return
+        }
+        this.sessionSnapshot = { items: sessions.sessions, updatedAt: Date.now() }
       }
 
-      let filteredSessions = sessions.sessions
+      let filteredSessions = this.sessionSnapshot.items
       if (keyword) {
         const lowerKeyword = keyword.toLowerCase()
-        filteredSessions = sessions.sessions.filter(s => 
+        filteredSessions = filteredSessions.filter(s =>
           s.username.toLowerCase().includes(lowerKeyword) ||
           (s.displayName && s.displayName.toLowerCase().includes(lowerKeyword))
         )
       }
 
-      const limitedSessions = filteredSessions.slice(0, limit)
+      const page = paginateApiItems(filteredSessions, offset, limit)
+      const limitedSessions = page.items
 
       if (format === 'chatlab') {
         this.sendJson(res, {
+          count: limitedSessions.length,
+          total: page.total,
+          offset: page.offset,
+          limit: page.limit,
+          hasMore: page.hasMore,
+          nextOffset: page.nextOffset,
           sessions: limitedSessions.map(s => ({
             id: s.username,
             name: s.displayName || s.username,
@@ -1012,6 +1027,11 @@ class HttpService {
       this.sendJson(res, {
         success: true,
         count: limitedSessions.length,
+        total: page.total,
+        offset: page.offset,
+        limit: page.limit,
+        hasMore: page.hasMore,
+        nextOffset: page.nextOffset,
         sessions: limitedSessions.map(s => ({
           username: s.username,
           displayName: s.displayName,
@@ -1079,19 +1099,23 @@ class HttpService {
    */
   private async handleContacts(url: URL, res: http.ServerResponse): Promise<void> {
     const keyword = (url.searchParams.get('keyword') || '').trim()
-    const limit = this.parseIntParam(url.searchParams.get('limit'), 100, 1, 10000)
+    const limit = this.parseIntParam(url.searchParams.get('limit'), API_ENTITY_PAGE_MAX_LIMIT, 1, API_ENTITY_PAGE_MAX_LIMIT)
+    const offset = this.parseIntParam(url.searchParams.get('offset'), 0, 0, Number.MAX_SAFE_INTEGER)
 
     try {
-      const contacts = await chatService.getContacts()
-      if (!contacts.success || !contacts.contacts) {
-        this.sendError(res, 500, contacts.error || 'Failed to get contacts')
-        return
+      if (!this.contactSnapshot || Date.now() - this.contactSnapshot.updatedAt > this.entitySnapshotTtlMs) {
+        const contacts = await chatService.getContacts()
+        if (!contacts.success || !contacts.contacts) {
+          this.sendError(res, 500, contacts.error || 'Failed to get contacts')
+          return
+        }
+        this.contactSnapshot = { items: contacts.contacts, updatedAt: Date.now() }
       }
 
-      let filteredContacts = contacts.contacts
+      let filteredContacts = this.contactSnapshot.items
       if (keyword) {
         const lowerKeyword = keyword.toLowerCase()
-        filteredContacts = contacts.contacts.filter(c =>
+        filteredContacts = filteredContacts.filter(c =>
           c.username.toLowerCase().includes(lowerKeyword) ||
           (c.nickname && c.nickname.toLowerCase().includes(lowerKeyword)) ||
           (c.remark && c.remark.toLowerCase().includes(lowerKeyword)) ||
@@ -1099,11 +1123,17 @@ class HttpService {
         )
       }
 
-      const limited = filteredContacts.slice(0, limit)
+      const page = paginateApiItems(filteredContacts, offset, limit)
+      const limited = page.items
 
       this.sendJson(res, {
         success: true,
         count: limited.length,
+        total: page.total,
+        offset: page.offset,
+        limit: page.limit,
+        hasMore: page.hasMore,
+        nextOffset: page.nextOffset,
         contacts: limited
       })
     } catch (error) {

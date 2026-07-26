@@ -337,12 +337,18 @@ GET /api/v1/sessions
 | 参数      | 类型   | 必填 | 说明                             |
 | --------- | ------ | ---- | -------------------------------- |
 | `keyword` | string | 否   | 匹配 `username` 或 `displayName` |
-| `limit`   | number | 否   | 默认 `100`                       |
+| `limit`   | number | 否   | 默认及最大 `200`                 |
+| `offset`  | number | 否   | 分页偏移，默认 `0`               |
 
 ### 响应字段
 
 - `success`
 - `count`
+- `total`
+- `offset`
+- `limit`
+- `hasMore`
+- `nextOffset`
 - `sessions[].username`
 - `sessions[].displayName`
 - `sessions[].type`
@@ -355,6 +361,11 @@ GET /api/v1/sessions
 {
   "success": true,
   "count": 1,
+  "total": 201,
+  "offset": 0,
+  "limit": 200,
+  "hasMore": true,
+  "nextOffset": 200,
   "sessions": [
     {
       "username": "xxx@chatroom",
@@ -385,7 +396,8 @@ GET /api/v1/sessions?format=chatlab
 | --------- | ------ | ---- | -------------------------------- |
 | `format`  | string | 是   | 设为 `chatlab`                   |
 | `keyword` | string | 否   | 匹配 `username` 或 `displayName` |
-| `limit`   | number | 否   | 默认 `100`                       |
+| `limit`   | number | 否   | 默认及最大 `200`                 |
+| `offset`  | number | 否   | 分页偏移，默认 `0`               |
 
 ### 响应
 
@@ -508,12 +520,18 @@ GET /api/v1/contacts
 | 参数      | 类型   | 必填 | 说明                                                 |
 | --------- | ------ | ---- | ---------------------------------------------------- |
 | `keyword` | string | 否   | 匹配 `username`、`nickname`、`remark`、`displayName` |
-| `limit`   | number | 否   | 默认 `100`                                           |
+| `limit`   | number | 否   | 默认及最大 `200`                                     |
+| `offset`  | number | 否   | 分页偏移，默认 `0`                                   |
 
 ### 响应字段
 
 - `success`
 - `count`
+- `total`
+- `offset`
+- `limit`
+- `hasMore`
+- `nextOffset`
 - `contacts[].username`
 - `contacts[].displayName`
 - `contacts[].remark`
@@ -528,6 +546,11 @@ GET /api/v1/contacts
 {
   "success": true,
   "count": 1,
+  "total": 201,
+  "offset": 0,
+  "limit": 200,
+  "hasMore": true,
+  "nextOffset": 200,
   "contacts": [
     {
       "username": "wxid_xxx",
