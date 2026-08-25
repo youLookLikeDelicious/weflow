@@ -16,6 +16,13 @@ import { groupAnalyticsService } from './groupAnalyticsService'
 import { snsService } from './snsService'
 import { apiMediaJobService, type ApiMediaJobRecord, type ApiMediaKind } from './apiMediaJobService'
 import { API_ENTITY_PAGE_MAX_LIMIT, paginateApiItems } from './apiPagination'
+import {
+  cleanupApiMediaStorage,
+  clearApiMediaStorage,
+  ensureApiMediaStorageRoot,
+  inspectApiMediaStorage,
+  type ApiMediaCleanupResult
+} from './apiMediaStorageService'
 
 // ChatLab 格式定义
 interface ChatLabHeader {
@@ -89,6 +96,10 @@ const API_MESSAGES_MEDIA_MAX_LIMIT = 20
 const API_MESSAGES_MIN_BATCH_SIZE = 50
 const API_MESSAGES_MAX_BATCH_SIZE = 200
 const API_SLOW_REQUEST_WARNING_MS = 2000
+const API_MEDIA_DEFAULT_MAX_GB = 10
+const API_MEDIA_DEFAULT_RETENTION_DAYS = 30
+const API_MEDIA_CLEANUP_INTERVAL_MS = 60 * 60 * 1000
+const BYTES_PER_GB = 1024 * 1024 * 1024
 
 type MediaKind = 'image' | 'voice' | 'video' | 'emoji'
 type ApiSessionType = 'group' | 'private' | 'channel' | 'other'
@@ -103,6 +114,12 @@ interface ApiExportedMedia {
 interface ApiResolvedMedia {
   mediaMap: Map<number, ApiExportedMedia>
   jobMap: Map<number, ApiMediaJobRecord>
+}
+
+interface ApiMediaStorageSettingsInput {
+  mediaPath?: string
+  maxGb?: number
+  retentionDays?: number
 }
 
 interface MessagePushReplayEvent {
@@ -148,7 +165,13 @@ class HttpService {
   private messagePushEventId = 0
   private mediaJobWorkerRunning = false
   private mediaJobWorkerStopped = false
+  private mediaJobWorkerStartPending = false
   private activeMediaJobTalkers = new Set<string>()
+  private mediaCleanupTimer: ReturnType<typeof setInterval> | null = null
+  private mediaCleanupRunning = false
+  private mediaCleanupPending = false
+  private lastMediaCleanupAt = 0
+  private lastMediaCleanupResult: ApiMediaCleanupResult | null = null
   private readonly messagePushReplayLimit = 1000
   private readonly messagePushReplayTtlMs = 10 * 60 * 1000
   private readonly mediaJobWorkerConcurrency = 2
@@ -210,7 +233,12 @@ class HttpService {
         this.mediaJobWorkerStopped = false
         apiMediaJobService.recoverProcessingJobs()
         this.startMessagePushHeartbeat()
-        this.scheduleMediaJobWorker()
+        this.startMediaCleanupTimer()
+        void this.runMediaStorageCleanup('startup')
+          .catch(error => console.error('[HttpService] startup media cleanup failed:', error))
+          .finally(() => {
+            this.scheduleMediaJobWorker()
+          })
         console.log(`[HttpService] HTTP API server started on http://${this.host}:${this.port}`)
         resolve({ success: true, port: this.port })
       })
@@ -235,6 +263,12 @@ class HttpService {
           this.messagePushHeartbeatTimer = null
         }
         this.mediaJobWorkerStopped = true
+        this.mediaJobWorkerStartPending = false
+        this.mediaCleanupPending = false
+        if (this.mediaCleanupTimer) {
+          clearInterval(this.mediaCleanupTimer)
+          this.mediaCleanupTimer = null
+        }
         this.activeMediaJobTalkers.clear()
         apiMediaJobService.close()
         // 使用互斥锁保护连接集合操作
@@ -281,6 +315,85 @@ class HttpService {
 
   getDefaultMediaExportPath(): string {
     return this.getApiMediaExportPath()
+  }
+
+  async getMediaStorageStatus(): Promise<Record<string, unknown>> {
+    const mediaPath = this.getApiMediaExportPath()
+    await this.ensureManagedMediaPath(mediaPath)
+    const usage = await inspectApiMediaStorage(mediaPath)
+    return {
+      mediaPath,
+      maxGb: this.getApiMediaMaxGb(),
+      retentionDays: this.getApiMediaRetentionDays(),
+      targetGb: this.getApiMediaMaxGb() * 0.9,
+      usageBytes: usage.bytes,
+      fileCount: usage.files,
+      scanErrors: usage.errors,
+      cleanupRunning: this.mediaCleanupRunning,
+      lastCleanupAt: this.lastMediaCleanupAt || undefined,
+      lastCleanup: this.lastMediaCleanupResult || undefined
+    }
+  }
+
+  async updateMediaStorageSettings(
+    input: ApiMediaStorageSettingsInput
+  ): Promise<{ success: boolean; status?: Record<string, unknown>; error?: string }> {
+    try {
+      const oldPath = this.getApiMediaExportPath()
+      const requestedPath = String(input.mediaPath ?? oldPath).trim()
+      const newPath = path.resolve(requestedPath || this.getLegacyApiMediaExportPath())
+      const pathChanged = path.resolve(oldPath) !== newPath
+      if (pathChanged && this.running) {
+        return { success: false, error: '修改媒体目录前请先停止 HTTP API 服务' }
+      }
+
+      await ensureApiMediaStorageRoot(newPath, {
+        allowExistingUnmarked: newPath === path.resolve(this.getLegacyApiMediaExportPath())
+      })
+
+      if (pathChanged) {
+        await this.ensureManagedMediaPath(oldPath)
+        const cleared = await clearApiMediaStorage(oldPath)
+        apiMediaJobService.requeueAllReadyJobs()
+        if (cleared.errors.length > 0) {
+          return { success: false, error: cleared.errors.map(item => item.message).join('; ') }
+        }
+      }
+
+      this.configService.set('httpApiMediaPath', newPath)
+      this.configService.set('httpApiMediaMaxGb', this.normalizeMediaMaxGb(input.maxGb))
+      this.configService.set('httpApiMediaRetentionDays', this.normalizeMediaRetentionDays(input.retentionDays))
+      await this.withMediaWorkerPaused(() => this.runMediaStorageCleanup('settings'))
+      return { success: true, status: await this.getMediaStorageStatus() }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  async cleanupMediaStorageNow(): Promise<{ success: boolean; result?: ApiMediaCleanupResult; error?: string }> {
+    try {
+      const result = await this.withMediaWorkerPaused(() => this.runMediaStorageCleanup('manual'))
+      return { success: true, result }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  async clearMediaStorage(): Promise<{ success: boolean; result?: ApiMediaCleanupResult; error?: string }> {
+    try {
+      const result = await this.withMediaWorkerPaused(async () => {
+        const mediaPath = this.getApiMediaExportPath()
+        await this.ensureManagedMediaPath(mediaPath)
+        const cleared = await clearApiMediaStorage(mediaPath)
+        apiMediaJobService.requeueAllReadyJobs()
+        this.lastMediaCleanupAt = Date.now()
+        this.lastMediaCleanupResult = cleared
+        return cleared
+      })
+      return { success: result.errors.length === 0, result, error: result.errors[0]?.message }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
   }
 
   getMessagePushStreamUrl(): string {
@@ -612,6 +725,8 @@ class HttpService {
 
     try {
       const stat = fs.statSync(fullPath)
+      const accessTime = new Date()
+      void fs.promises.utimes(fullPath, accessTime, accessTime).catch(() => {})
       res.setHeader('Content-Type', contentType)
       res.setHeader('Content-Length', stat.size)
       res.writeHead(200)
@@ -1533,8 +1648,113 @@ class HttpService {
     )
   }
 
-  private getApiMediaExportPath(): string {
+  private getLegacyApiMediaExportPath(): string {
     return path.join(this.configService.getCacheBasePath(), 'api-media')
+  }
+
+  private getApiMediaExportPath(): string {
+    const configured = String(this.configService.get('httpApiMediaPath') || '').trim()
+    return path.resolve(configured || this.getLegacyApiMediaExportPath())
+  }
+
+  private getApiMediaMaxGb(): number {
+    return this.normalizeMediaMaxGb(this.configService.get('httpApiMediaMaxGb'))
+  }
+
+  private getApiMediaRetentionDays(): number {
+    return this.normalizeMediaRetentionDays(this.configService.get('httpApiMediaRetentionDays'))
+  }
+
+  private normalizeMediaMaxGb(value: unknown): number {
+    const numeric = Number(value)
+    if (!Number.isFinite(numeric)) return API_MEDIA_DEFAULT_MAX_GB
+    return Math.max(1, Math.min(1024, Math.round(numeric * 10) / 10))
+  }
+
+  private normalizeMediaRetentionDays(value: unknown): number {
+    const numeric = Number(value)
+    if (!Number.isFinite(numeric)) return API_MEDIA_DEFAULT_RETENTION_DAYS
+    return Math.max(1, Math.min(3650, Math.floor(numeric)))
+  }
+
+  private async ensureManagedMediaPath(mediaPath: string): Promise<void> {
+    await ensureApiMediaStorageRoot(mediaPath, {
+      allowExistingUnmarked: path.resolve(mediaPath) === path.resolve(this.getLegacyApiMediaExportPath())
+    })
+  }
+
+  private startMediaCleanupTimer(): void {
+    if (this.mediaCleanupTimer) return
+    this.mediaCleanupTimer = setInterval(() => {
+      this.requestMediaStorageCleanup('hourly')
+    }, API_MEDIA_CLEANUP_INTERVAL_MS)
+  }
+
+  private requestMediaStorageCleanup(reason: string): void {
+    if (this.mediaJobWorkerRunning || this.activeMediaJobTalkers.size > 0) {
+      this.mediaCleanupPending = true
+      return
+    }
+    void this.runMediaStorageCleanup(reason).catch(error => {
+      console.error(`[HttpService] API media cleanup (${reason}) failed:`, error)
+    })
+  }
+
+  private async runMediaStorageCleanup(reason: string): Promise<ApiMediaCleanupResult> {
+    while (this.mediaCleanupRunning) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    this.mediaCleanupRunning = true
+    const startedAt = Date.now()
+    try {
+      const mediaPath = this.getApiMediaExportPath()
+      await this.ensureManagedMediaPath(mediaPath)
+      const maxBytes = Math.floor(this.getApiMediaMaxGb() * BYTES_PER_GB)
+      const result = await cleanupApiMediaStorage(mediaPath, {
+        maxBytes,
+        targetBytes: Math.floor(maxBytes * 0.9),
+        retentionMs: this.getApiMediaRetentionDays() * 24 * 60 * 60 * 1000
+      })
+      apiMediaJobService.requeueReadyJobsByRelativePaths(result.removedRelativePaths)
+      this.lastMediaCleanupAt = Date.now()
+      this.lastMediaCleanupResult = result
+      console.log(
+        `[HttpService] API media cleanup (${reason}) scanned=${result.scannedFiles} ` +
+        `removed=${result.removedFiles} before=${result.beforeBytes} after=${result.afterBytes} ` +
+        `elapsedMs=${Date.now() - startedAt}`
+      )
+      if (result.errors.length > 0) {
+        console.warn('[HttpService] API media cleanup errors:', result.errors.slice(0, 10))
+      }
+      return result
+    } finally {
+      this.mediaCleanupRunning = false
+      if (this.mediaJobWorkerStartPending && !this.mediaJobWorkerStopped) {
+        this.mediaJobWorkerStartPending = false
+        this.scheduleMediaJobWorker()
+      }
+    }
+  }
+
+  private async withMediaWorkerPaused<T>(operation: () => Promise<T>): Promise<T> {
+    const wasStopped = this.mediaJobWorkerStopped
+    this.mediaJobWorkerStopped = true
+    const deadline = Date.now() + 30_000
+    while ((this.mediaJobWorkerRunning || this.activeMediaJobTalkers.size > 0) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    if (this.mediaJobWorkerRunning || this.activeMediaJobTalkers.size > 0) {
+      this.mediaJobWorkerStopped = wasStopped
+      throw new Error('媒体任务仍在处理中，请稍后重试')
+    }
+
+    apiMediaJobService.recoverProcessingJobs()
+    try {
+      return await operation()
+    } finally {
+      this.mediaJobWorkerStopped = wasStopped
+      if (!wasStopped && this.running) this.scheduleMediaJobWorker()
+    }
   }
 
   private sanitizeFileName(value: string, fallback: string): string {
@@ -1592,7 +1812,7 @@ class HttpService {
       const mediaKind = this.getMessageMediaKind(msg, options)
       if (!mediaKind) continue
 
-      const job = apiMediaJobService.getOrCreateJob({
+      let job = apiMediaJobService.getOrCreateJob({
         sourceId: this.getApiMediaSourceId(),
         talker,
         message: msg,
@@ -1604,6 +1824,11 @@ class HttpService {
       const exported = this.toExportedMediaFromJob(job)
       if (exported) {
         mediaMap.set(msg.localId, exported)
+      } else if (job.status === 'ready') {
+        apiMediaJobService.requeueJob(job.id)
+        job = apiMediaJobService.getJob(job.id) || job
+        jobMap.set(msg.localId, job)
+        this.scheduleMediaJobWorker()
       } else if (job.status === 'queued' || job.status === 'failed') {
         this.scheduleMediaJobWorker()
       }
@@ -1642,6 +1867,11 @@ class HttpService {
 
   private toApiMediaJob(job: ApiMediaJobRecord): Record<string, unknown> {
     const exported = this.toExportedMediaFromJob(job)
+    if (!exported && job.status === 'ready') {
+      apiMediaJobService.requeueJob(job.id)
+      job = apiMediaJobService.getJob(job.id) || job
+      this.scheduleMediaJobWorker()
+    }
     return {
       id: job.id,
       sourceId: job.sourceId,
@@ -1654,7 +1884,7 @@ class HttpService {
       status: exported ? 'ready' : job.status,
       mediaUrl: exported ? `http://${this.host}:${this.port}/api/v1/media/${exported.relativePath}` : undefined,
       missingReason: job.missingReason || undefined,
-      lastError: job.lastError || undefined,
+      lastError: job.lastError && job.lastError !== 'evicted' ? job.lastError : undefined,
       attempts: job.attempts,
       updatedAt: job.updatedAt
     }
@@ -1662,6 +1892,10 @@ class HttpService {
 
   private scheduleMediaJobWorker(): void {
     if (this.mediaJobWorkerStopped || this.mediaJobWorkerRunning) return
+    if (this.mediaCleanupRunning) {
+      this.mediaJobWorkerStartPending = true
+      return
+    }
     this.mediaJobWorkerRunning = true
     setImmediate(() => {
       void this.runMediaJobWorker()
@@ -1686,6 +1920,12 @@ class HttpService {
       }
     } finally {
       this.mediaJobWorkerRunning = false
+      if (this.mediaCleanupPending && !this.mediaJobWorkerStopped) {
+        this.mediaCleanupPending = false
+        void this.runMediaStorageCleanup('deferred-hourly').catch(error => {
+          console.error('[HttpService] deferred API media cleanup failed:', error)
+        })
+      }
     }
   }
 

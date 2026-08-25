@@ -1450,7 +1450,44 @@ export interface ElectronAPI {
   http: {
     start: (port?: number, host?: string) => Promise<{ success: boolean; port?: number; error?: string }>
     stop: () => Promise<{ success: boolean }>
-    status: () => Promise<{ running: boolean; port: number; mediaExportPath: string }>
+    status: () => Promise<{
+      running: boolean
+      port: number
+      mediaExportPath: string
+      mediaStorage: {
+        mediaPath: string
+        maxGb: number
+        retentionDays: number
+        targetGb: number
+        usageBytes: number
+        fileCount: number
+        cleanupRunning: boolean
+        lastCleanupAt?: number
+      }
+    }>
+    updateMediaStorage: (input: {
+      mediaPath?: string
+      maxGb?: number
+      retentionDays?: number
+    }) => Promise<{
+      success: boolean
+      status?: {
+        mediaPath: string
+        maxGb: number
+        retentionDays: number
+        targetGb: number
+        usageBytes: number
+        fileCount: number
+        cleanupRunning: boolean
+        lastCleanupAt?: number
+      }
+      error?: string
+    }>
+    cleanupMediaStorage: () => Promise<{
+      success: boolean
+      result?: { removedFiles: number; beforeBytes: number; afterBytes: number }
+      error?: string
+    }>
   }
   social: {
     saveWeiboCookie: (rawInput: string) => Promise<SocialSaveWeiboCookieResult>

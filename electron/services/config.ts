@@ -83,6 +83,9 @@ interface ConfigSchema {
   httpApiPort: number
   httpApiHost: string
   httpApiToken: string
+  httpApiMediaPath: string
+  httpApiMediaMaxGb: number
+  httpApiMediaRetentionDays: number
   windowCloseBehavior: 'ask' | 'tray' | 'quit'
   quoteLayout: 'quote-top' | 'quote-bottom'
   wordCloudExcludeWords: string[]
@@ -222,6 +225,9 @@ export class ConfigService {
       httpApiEnabled: false,
       httpApiPort: 5031,
       httpApiHost: '127.0.0.1',
+      httpApiMediaPath: '',
+      httpApiMediaMaxGb: 10,
+      httpApiMediaRetentionDays: 30,
       messagePushEnabled: false,
       messagePushFilterMode: 'all',
       messagePushFilterList: [],
@@ -1083,4 +1089,3 @@ export class ConfigService {
     this.unlockPassword = null
   }
 }
-

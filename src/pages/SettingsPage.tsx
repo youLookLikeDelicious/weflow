@@ -275,6 +275,13 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [httpApiHost, setHttpApiHost] = useState('127.0.0.1')
   const [httpApiRunning, setHttpApiRunning] = useState(false)
   const [httpApiMediaExportPath, setHttpApiMediaExportPath] = useState('')
+  const [httpApiMediaSavedPath, setHttpApiMediaSavedPath] = useState('')
+  const [httpApiMediaMaxGb, setHttpApiMediaMaxGb] = useState(10)
+  const [httpApiMediaRetentionDays, setHttpApiMediaRetentionDays] = useState(30)
+  const [httpApiMediaUsageBytes, setHttpApiMediaUsageBytes] = useState(0)
+  const [httpApiMediaFileCount, setHttpApiMediaFileCount] = useState(0)
+  const [isSavingApiMedia, setIsSavingApiMedia] = useState(false)
+  const [isCleaningApiMedia, setIsCleaningApiMedia] = useState(false)
   const [isTogglingApi, setIsTogglingApi] = useState(false)
   const [showApiWarning, setShowApiWarning] = useState(false)
   const [messagePushEnabled, setMessagePushEnabled] = useState(false)
@@ -367,6 +374,14 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         }
         if (status.mediaExportPath) {
           setHttpApiMediaExportPath(status.mediaExportPath)
+        }
+        if (status.mediaStorage) {
+          setHttpApiMediaExportPath(status.mediaStorage.mediaPath)
+          setHttpApiMediaSavedPath(status.mediaStorage.mediaPath)
+          setHttpApiMediaMaxGb(status.mediaStorage.maxGb)
+          setHttpApiMediaRetentionDays(status.mediaStorage.retentionDays)
+          setHttpApiMediaUsageBytes(status.mediaStorage.usageBytes)
+          setHttpApiMediaFileCount(status.mediaStorage.fileCount)
         }
       } catch (e) {
         console.error('检查 API 状态失败:', e)
@@ -2799,6 +2814,85 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     showMessage('已复制 API 地址', true)
   }
 
+  const applyApiMediaStorageStatus = (status: {
+    mediaPath: string
+    maxGb: number
+    retentionDays: number
+    usageBytes: number
+    fileCount: number
+  }) => {
+    setHttpApiMediaExportPath(status.mediaPath)
+    setHttpApiMediaSavedPath(status.mediaPath)
+    setHttpApiMediaMaxGb(status.maxGb)
+    setHttpApiMediaRetentionDays(status.retentionDays)
+    setHttpApiMediaUsageBytes(status.usageBytes)
+    setHttpApiMediaFileCount(status.fileCount)
+  }
+
+  const refreshApiMediaStorageStatus = async () => {
+    const status = await window.electronAPI.http.status()
+    if (status.mediaStorage) applyApiMediaStorageStatus(status.mediaStorage)
+  }
+
+  const handleSelectApiMediaPath = async () => {
+    try {
+      const result = await dialog.openFile({
+        title: '选择 API 媒体缓存目录',
+        properties: ['openDirectory']
+      })
+      if (!result.canceled && result.filePaths.length > 0) {
+        setHttpApiMediaExportPath(result.filePaths[0])
+      }
+    } catch {
+      showMessage('选择目录失败', false)
+    }
+  }
+
+  const handleSaveApiMediaStorage = async () => {
+    if (isSavingApiMedia) return
+    const pathChanged = httpApiMediaExportPath !== httpApiMediaSavedPath
+    if (pathChanged && !window.confirm('切换目录会删除旧目录中的 API 媒体缓存，任务将在下次访问时重新生成。继续吗？')) {
+      return
+    }
+
+    setIsSavingApiMedia(true)
+    try {
+      const result = await window.electronAPI.http.updateMediaStorage({
+        mediaPath: httpApiMediaExportPath,
+        maxGb: httpApiMediaMaxGb,
+        retentionDays: httpApiMediaRetentionDays
+      })
+      if (!result.success || !result.status) {
+        showMessage(`保存失败: ${result.error || '未知错误'}`, false)
+        return
+      }
+      applyApiMediaStorageStatus(result.status)
+      showMessage('API 媒体缓存设置已保存', true)
+    } catch (error) {
+      showMessage(`保存失败: ${error}`, false)
+    } finally {
+      setIsSavingApiMedia(false)
+    }
+  }
+
+  const handleCleanupApiMediaStorage = async () => {
+    if (isCleaningApiMedia) return
+    setIsCleaningApiMedia(true)
+    try {
+      const result = await window.electronAPI.http.cleanupMediaStorage()
+      if (!result.success) {
+        showMessage(`清理失败: ${result.error || '未知错误'}`, false)
+        return
+      }
+      await refreshApiMediaStorageStatus()
+      showMessage(`清理完成，删除 ${result.result?.removedFiles || 0} 个文件`, true)
+    } catch (error) {
+      showMessage(`清理失败: ${error}`, false)
+    } finally {
+      setIsCleaningApiMedia(false)
+    }
+  }
+
   const handleToggleMessagePush = async (enabled: boolean) => {
     setMessagePushEnabled(enabled)
     await configService.setMessagePushEnabled(enabled)
@@ -4623,16 +4717,76 @@ JSON 输出格式：
         </div>
       )}
 
-      {/* API 安全警告弹窗 */}
       <div className="form-group">
-        <label>默认媒体导出目录</label>
-        <span className="form-hint">`/api/v1/messages` 在开启 `media=1` 时会把媒体保存到这里</span>
-        <input
-          type="text"
-          className="field-input"
-          value={httpApiMediaExportPath || '未获取到目录'}
-          readOnly
-        />
+        <label>API 媒体缓存</label>
+        <span className="form-hint">
+          图片、语音和视频由后台任务写入此目录；超过上限后按最旧访问时间清理到上限的 90%
+        </span>
+        <div className="api-url-display">
+          <input
+            type="text"
+            className="field-input"
+            value={httpApiMediaExportPath || '未获取到目录'}
+            readOnly
+          />
+          <button
+            className="btn btn-secondary"
+            onClick={() => { void handleSelectApiMediaPath() }}
+            disabled={httpApiRunning || isSavingApiMedia || isCleaningApiMedia}
+            title={httpApiRunning ? '停止 API 服务后可修改目录' : '选择缓存目录'}
+          >
+            <FolderOpen size={16} />
+          </button>
+        </div>
+        <div className="api-media-settings-grid">
+          <label>
+            <span>容量上限 (GB)</span>
+            <input
+              type="number"
+              className="field-input"
+              value={httpApiMediaMaxGb}
+              min={1}
+              max={1024}
+              step={0.5}
+              onChange={(event) => setHttpApiMediaMaxGb(Number(event.target.value) || 10)}
+            />
+          </label>
+          <label>
+            <span>保留天数</span>
+            <input
+              type="number"
+              className="field-input"
+              value={httpApiMediaRetentionDays}
+              min={1}
+              max={3650}
+              step={1}
+              onChange={(event) => setHttpApiMediaRetentionDays(Number(event.target.value) || 30)}
+            />
+          </label>
+        </div>
+        <div className="api-media-usage">
+          <span>当前占用 {formatBytes(httpApiMediaUsageBytes)}</span>
+          <span>{httpApiMediaFileCount.toLocaleString()} 个文件</span>
+          <span>上限 {httpApiMediaMaxGb} GB</span>
+        </div>
+        <div className="btn-row">
+          <button
+            className="btn btn-primary"
+            onClick={() => { void handleSaveApiMediaStorage() }}
+            disabled={isSavingApiMedia || isCleaningApiMedia}
+          >
+            {isSavingApiMedia ? <Loader2 size={16} className="spin" /> : <Check size={16} />}
+            保存缓存设置
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={() => { void handleCleanupApiMediaStorage() }}
+            disabled={isSavingApiMedia || isCleaningApiMedia}
+          >
+            {isCleaningApiMedia ? <Loader2 size={16} className="spin" /> : <Trash2 size={16} />}
+            立即清理
+          </button>
+        </div>
       </div>
 
       <div className="divider" />
@@ -5655,9 +5809,6 @@ JSON 输出格式：
 }
 
 export default SettingsPage
-
-
-
 
 
 

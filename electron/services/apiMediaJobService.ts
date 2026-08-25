@@ -111,7 +111,13 @@ class ApiMediaJobService {
     const localType = Number(input.message.localType || 0)
     const id = this.buildJobId(input.sourceId, input.talker, localId, localType)
     const existing = this.getJob(id)
-    if (existing) return existing
+    if (existing) {
+      if (existing.status === 'queued' && existing.lastError === 'evicted') {
+        this.activateEvictedJob(existing.id)
+        return this.getJob(existing.id)
+      }
+      return existing
+    }
 
     const now = Math.floor(Date.now() / 1000)
     const payloadJson = JSON.stringify(input.message)
@@ -152,7 +158,7 @@ class ApiMediaJobService {
     if (!this.init() || !this.db) return []
     const candidates = this.db.prepare(`
       SELECT * FROM media_jobs
-      WHERE status IN ('queued', 'failed') AND attempts < ?
+      WHERE status IN ('queued', 'failed') AND attempts < ? AND last_error <> 'evicted'
       ORDER BY updated_at ASC
       LIMIT 50
     `).all(maxAttempts)
@@ -199,6 +205,66 @@ class ApiMediaJobService {
       SET status = 'queued', updated_at = ?
       WHERE status = 'processing'
     `).run(now)
+  }
+
+  requeueJob(id: string): boolean {
+    if (!this.init() || !this.db) return false
+    const now = Math.floor(Date.now() / 1000)
+    const result = this.db.prepare(`
+      UPDATE media_jobs
+      SET status = 'queued', attempts = 0, output_relative_path = '',
+          missing_reason = '', last_error = '', updated_at = ?
+      WHERE id = ? AND status = 'ready'
+    `).run(now, id)
+    return Number(result?.changes || 0) > 0
+  }
+
+  requeueReadyJobsByRelativePaths(relativePaths: string[]): number {
+    if (!this.init() || !this.db || relativePaths.length === 0) return 0
+    const now = Math.floor(Date.now() / 1000)
+    const uniquePaths = Array.from(new Set(relativePaths.filter(Boolean)))
+    let changed = 0
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      for (let offset = 0; offset < uniquePaths.length; offset += 200) {
+        const batch = uniquePaths.slice(offset, offset + 200)
+        const placeholders = batch.map(() => '?').join(', ')
+        const result = this.db.prepare(`
+          UPDATE media_jobs
+          SET status = 'queued', attempts = 0, output_relative_path = '',
+              missing_reason = '', last_error = 'evicted', updated_at = ?
+          WHERE status = 'ready' AND output_relative_path IN (${placeholders})
+        `).run(now, ...batch)
+        changed += Number(result?.changes || 0)
+      }
+      this.db.exec('COMMIT')
+      return changed
+    } catch (error) {
+      try { this.db.exec('ROLLBACK') } catch {}
+      throw error
+    }
+  }
+
+  requeueAllReadyJobs(): number {
+    if (!this.init() || !this.db) return 0
+    const now = Math.floor(Date.now() / 1000)
+    const result = this.db.prepare(`
+      UPDATE media_jobs
+      SET status = 'queued', attempts = 0, output_relative_path = '',
+          missing_reason = '', last_error = 'evicted', updated_at = ?
+      WHERE status = 'ready'
+    `).run(now)
+    return Number(result?.changes || 0)
+  }
+
+  private activateEvictedJob(id: string): void {
+    if (!this.init() || !this.db) return
+    const now = Math.floor(Date.now() / 1000)
+    this.db.prepare(`
+      UPDATE media_jobs
+      SET last_error = '', updated_at = ?
+      WHERE id = ? AND status = 'queued' AND last_error = 'evicted'
+    `).run(now, id)
   }
 
   private updateStatus(

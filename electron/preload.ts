@@ -578,7 +578,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   http: {
     start: (port?: number, host?: string) => ipcRenderer.invoke('http:start', port, host),
     stop: () => ipcRenderer.invoke('http:stop'),
-    status: () => ipcRenderer.invoke('http:status')
+    status: () => ipcRenderer.invoke('http:status'),
+    updateMediaStorage: (input: { mediaPath?: string; maxGb?: number; retentionDays?: number }) =>
+      ipcRenderer.invoke('http:updateMediaStorage', input),
+    cleanupMediaStorage: () => ipcRenderer.invoke('http:cleanupMediaStorage')
   },
 
   // AI 见解

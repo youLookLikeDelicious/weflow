@@ -2649,6 +2649,35 @@
   }
 }
 
+.api-media-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(140px, 220px));
+  gap: 12px;
+  margin-top: 12px;
+
+  label {
+    display: grid;
+    gap: 6px;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+}
+
+.api-media-usage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 12px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+@media (max-width: 640px) {
+  .api-media-settings-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 // API 服务设置样式
 .status-badge {
   display: inline-flex;
@@ -3762,5 +3791,4 @@
     }
   }
 }
-
 

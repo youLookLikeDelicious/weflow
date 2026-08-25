@@ -3597,13 +3597,14 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('cache:clearAll', async () => {
-    const [analyticsResult, imageResult] = await Promise.all([
+    const [analyticsResult, imageResult, apiMediaResult] = await Promise.all([
       analyticsService.clearCache(),
-      imageDecryptService.clearCache()
+      imageDecryptService.clearCache(),
+      httpService.clearMediaStorage()
     ])
     const chatResult = chatService.clearCaches()
     snsService.clearMemoryCache()
-    const errors = [analyticsResult, imageResult, chatResult]
+    const errors = [analyticsResult, imageResult, apiMediaResult, chatResult]
       .filter((result) => !result.success)
       .map((result) => result.error)
       .filter(Boolean) as string[]
@@ -4139,11 +4140,25 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('http:status', async () => {
+    const mediaStorage = await httpService.getMediaStorageStatus()
     return {
       running: httpService.isRunning(),
       port: httpService.getPort(),
-      mediaExportPath: httpService.getDefaultMediaExportPath()
+      mediaExportPath: httpService.getDefaultMediaExportPath(),
+      mediaStorage
     }
+  })
+
+  ipcMain.handle('http:updateMediaStorage', async (_, input: {
+    mediaPath?: string
+    maxGb?: number
+    retentionDays?: number
+  }) => {
+    return httpService.updateMediaStorageSettings(input || {})
+  })
+
+  ipcMain.handle('http:cleanupMediaStorage', async () => {
+    return httpService.cleanupMediaStorageNow()
   })
 
   // 自动下载原图
