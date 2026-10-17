@@ -38,6 +38,8 @@ export const CONFIG_KEYS = {
   EXPORT_DEFAULT_EXCEL_COMPACT_COLUMNS: 'exportDefaultExcelCompactColumns',
   EXPORT_DEFAULT_TXT_COLUMNS: 'exportDefaultTxtColumns',
   EXPORT_DEFAULT_CONCURRENCY: 'exportDefaultConcurrency',
+  EXPORT_DEFAULT_MESSAGE_LIMIT: 'exportDefaultMessageLimit',
+  EXPORT_DEFAULT_MEDIA_MAX_AGE_DAYS: 'exportDefaultMediaMaxAgeDays',
   EXPORT_WRITE_LAYOUT: 'exportWriteLayout',
   EXPORT_SESSION_NAME_PREFIX_ENABLED: 'exportSessionNamePrefixEnabled',
   EXPORT_LAST_SESSION_RUN_MAP: 'exportLastSessionRunMap',
@@ -614,6 +616,36 @@ export async function getExportDefaultConcurrency(): Promise<number | null> {
 // 设置导出默认并发数
 export async function setExportDefaultConcurrency(concurrency: number): Promise<void> {
   await config.set(CONFIG_KEYS.EXPORT_DEFAULT_CONCURRENCY, concurrency)
+}
+
+export async function getExportDefaultMessageLimit(): Promise<number> {
+  const value = await config.get(CONFIG_KEYS.EXPORT_DEFAULT_MESSAGE_LIMIT)
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0
+  return Math.min(1_000_000, Math.floor(numeric))
+}
+
+export async function setExportDefaultMessageLimit(limit: number): Promise<void> {
+  const numeric = Number(limit)
+  const normalized = Number.isFinite(numeric) && numeric > 0
+    ? Math.min(1_000_000, Math.floor(numeric))
+    : 0
+  await config.set(CONFIG_KEYS.EXPORT_DEFAULT_MESSAGE_LIMIT, normalized)
+}
+
+export async function getExportDefaultMediaMaxAgeDays(): Promise<number> {
+  const value = await config.get(CONFIG_KEYS.EXPORT_DEFAULT_MEDIA_MAX_AGE_DAYS)
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0
+  return Math.min(3650, Math.floor(numeric))
+}
+
+export async function setExportDefaultMediaMaxAgeDays(days: number): Promise<void> {
+  const numeric = Number(days)
+  const normalized = Number.isFinite(numeric) && numeric > 0
+    ? Math.min(3650, Math.floor(numeric))
+    : 0
+  await config.set(CONFIG_KEYS.EXPORT_DEFAULT_MEDIA_MAX_AGE_DAYS, normalized)
 }
 
 export type ExportWriteLayout = 'A' | 'B' | 'C'

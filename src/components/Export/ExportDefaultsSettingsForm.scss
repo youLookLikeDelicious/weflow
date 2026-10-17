@@ -22,6 +22,18 @@
     margin-bottom: 8px;
   }
 
+  .settings-number-input {
+    width: 180px;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 9px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 14px;
+  }
+
   .select-field {
     position: relative;
     margin-bottom: 10px;

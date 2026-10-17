@@ -113,6 +113,8 @@ interface ExportOptions {
   txtColumns: string[]
   displayNamePreference: DisplayNamePreference
   exportConcurrency: number
+  messageLimitPerSession: number
+  mediaMaxAgeDays: number
 }
 
 interface SessionRow extends AppChatSession {
@@ -2347,6 +2349,8 @@ function ExportPage() {
   const [exportDefaultVoiceAsText, setExportDefaultVoiceAsText] = useState(false)
   const [exportDefaultExcelCompactColumns, setExportDefaultExcelCompactColumns] = useState(true)
   const [exportDefaultConcurrency, setExportDefaultConcurrency] = useState(2)
+  const [exportDefaultMessageLimit, setExportDefaultMessageLimit] = useState(0)
+  const [exportDefaultMediaMaxAgeDays, setExportDefaultMediaMaxAgeDays] = useState(0)
 
   const [options, setOptions] = useState<ExportOptions>({
     format: 'json',
@@ -2367,7 +2371,9 @@ function ExportPage() {
     excelCompactColumns: true,
     txtColumns: defaultTxtColumns,
     displayNamePreference: 'remark',
-    exportConcurrency: 2
+    exportConcurrency: 2,
+    messageLimitPerSession: 0,
+    mediaMaxAgeDays: 0
   })
 
   const exportStatsRangeOptions = useMemo(() => {
@@ -3085,7 +3091,7 @@ function ExportPage() {
     automationTasksReadyRef.current = false
     let isReady = true
     try {
-      const [savedPath, savedFormat, savedAvatars, savedMedia, savedVoiceAsText, savedExcelCompactColumns, savedTxtColumns, savedConcurrency, savedSessionMap, savedContentMap, savedSessionRecordMap, savedSnsPostCount, savedWriteLayout, savedSessionNameWithTypePrefix, savedDefaultDateRange, savedFileNamingMode, exportCacheScope] = await Promise.all([
+      const [savedPath, savedFormat, savedAvatars, savedMedia, savedVoiceAsText, savedExcelCompactColumns, savedTxtColumns, savedConcurrency, savedMessageLimit, savedMediaMaxAgeDays, savedSessionMap, savedContentMap, savedSessionRecordMap, savedSnsPostCount, savedWriteLayout, savedSessionNameWithTypePrefix, savedDefaultDateRange, savedFileNamingMode, exportCacheScope] = await Promise.all([
         configService.getExportPath(),
         configService.getExportDefaultFormat(),
         configService.getExportDefaultAvatars(),
@@ -3094,6 +3100,8 @@ function ExportPage() {
         configService.getExportDefaultExcelCompactColumns(),
         configService.getExportDefaultTxtColumns(),
         configService.getExportDefaultConcurrency(),
+        configService.getExportDefaultMessageLimit(),
+        configService.getExportDefaultMediaMaxAgeDays(),
         configService.getExportLastSessionRunMap(),
         configService.getExportLastContentRunMap(),
         configService.getExportSessionRecordMap(),
@@ -3133,6 +3141,8 @@ function ExportPage() {
       setExportDefaultVoiceAsText(savedVoiceAsText ?? false)
       setExportDefaultExcelCompactColumns(savedExcelCompactColumns ?? true)
       setExportDefaultConcurrency(savedConcurrency ?? 2)
+      setExportDefaultMessageLimit(savedMessageLimit ?? 0)
+      setExportDefaultMediaMaxAgeDays(savedMediaMaxAgeDays ?? 0)
       setExportDefaultFileNamingMode(savedFileNamingMode ?? 'classic')
       setAutomationTasks(automationTaskItem?.tasks || [])
       automationTasksReadyRef.current = true
@@ -3170,7 +3180,9 @@ function ExportPage() {
         exportVoiceAsText: savedVoiceAsText ?? prev.exportVoiceAsText,
         excelCompactColumns: savedExcelCompactColumns ?? prev.excelCompactColumns,
         txtColumns,
-        exportConcurrency: savedConcurrency ?? prev.exportConcurrency
+        exportConcurrency: savedConcurrency ?? prev.exportConcurrency,
+        messageLimitPerSession: savedMessageLimit ?? prev.messageLimitPerSession,
+        mediaMaxAgeDays: savedMediaMaxAgeDays ?? prev.mediaMaxAgeDays
       }))
     } catch (error) {
       isReady = false
@@ -4952,7 +4964,9 @@ function ExportPage() {
         maxFileSizeMb: prev.maxFileSizeMb,
         exportVoiceAsText: exportDefaultVoiceAsText,
         excelCompactColumns: exportDefaultExcelCompactColumns,
-        exportConcurrency: exportDefaultConcurrency
+        exportConcurrency: exportDefaultConcurrency,
+        messageLimitPerSession: exportDefaultMessageLimit,
+        mediaMaxAgeDays: exportDefaultMediaMaxAgeDays
       }
 
       if (payload.scope === 'sns') {
@@ -5241,6 +5255,8 @@ function ExportPage() {
       txtColumns: sourceOptions.txtColumns,
       displayNamePreference: sourceOptions.displayNamePreference,
       exportConcurrency: sourceOptions.exportConcurrency,
+      messageLimitPerSession: sourceOptions.messageLimitPerSession,
+      mediaMaxAgeDays: sourceOptions.mediaMaxAgeDays,
       fileNamingMode: exportDefaultFileNamingMode,
       sessionLayout,
       exportWriteLayout: writeLayout,
@@ -6252,6 +6268,8 @@ function ExportPage() {
     })
     await configService.setExportDefaultVoiceAsText(options.exportVoiceAsText)
     await configService.setExportDefaultExcelCompactColumns(options.excelCompactColumns)
+    await configService.setExportDefaultMessageLimit(options.messageLimitPerSession)
+    await configService.setExportDefaultMediaMaxAgeDays(options.mediaMaxAgeDays)
     await configService.setExportDefaultTxtColumns(options.txtColumns)
     await configService.setExportDefaultConcurrency(options.exportConcurrency)
   }
@@ -8829,6 +8847,14 @@ function ExportPage() {
     }
     if (typeof patch.concurrency === 'number') {
       setExportDefaultConcurrency(patch.concurrency)
+    }
+    if (typeof patch.messageLimitPerSession === 'number') {
+      setExportDefaultMessageLimit(patch.messageLimitPerSession)
+      setOptions(prev => ({ ...prev, messageLimitPerSession: patch.messageLimitPerSession! }))
+    }
+    if (typeof patch.mediaMaxAgeDays === 'number') {
+      setExportDefaultMediaMaxAgeDays(patch.mediaMaxAgeDays)
+      setOptions(prev => ({ ...prev, mediaMaxAgeDays: patch.mediaMaxAgeDays! }))
     }
   }, [])
 

@@ -14,6 +14,7 @@ import { videoService } from './videoService'
 import { voiceTranscribeService } from './voiceTranscribeService'
 import { exportRecordService } from './exportRecordService'
 import { EXPORT_HTML_STYLES } from './exportHtmlStyles'
+import { hasReachedExportMessageLimit, normalizeExportMessageLimit, shouldExportMediaForMessage } from './exportPolicy'
 import { LRUCache } from '../utils/LRUCache.js'
 
 // ChatLab 格式类型定义
@@ -116,6 +117,8 @@ export interface ExportOptions {
   sessionNameWithTypePrefix?: boolean
   displayNamePreference?: 'group-nickname' | 'remark' | 'nickname'
   exportConcurrency?: number
+  messageLimitPerSession?: number
+  mediaMaxAgeDays?: number
 }
 
 const TXT_COLUMN_DEFINITIONS: Array<{ id: string; label: string }> = [
@@ -1270,7 +1273,9 @@ class ExportService {
     normalizedSenderUsernameFilter: string,
     mediaType: 'image' | 'video',
     onCollectProgress?: (payload: { fetched: number }) => void,
-    control?: ExportTaskControl
+    control?: ExportTaskControl,
+    messageLimit?: number | null,
+    mediaMaxAgeDays?: number
   ): Promise<{
     success: boolean
     rows: any[]
@@ -1316,6 +1321,7 @@ class ExportService {
 
       for (const item of items) {
         const createTime = this.normalizeRowTimestampSeconds(item?.createTime)
+        if (!shouldExportMediaForMessage(createTime, mediaMaxAgeDays)) continue
         if (normalizedDateRange) {
           if (createTime > 0 && normalizedDateRange.start > 0 && createTime < normalizedDateRange.start) continue
           if (createTime > 0 && normalizedDateRange.end > 0 && createTime > normalizedDateRange.end) continue
@@ -1361,6 +1367,7 @@ class ExportService {
           if (firstTime === null || createTime < firstTime) firstTime = createTime
           if (lastTime === null || createTime > lastTime) lastTime = createTime
         }
+        if (hasReachedExportMessageLimit(rows.length, messageLimit)) break
       }
 
       onCollectProgress?.({ fetched: rows.length })
@@ -1370,6 +1377,7 @@ class ExportService {
         : offset + items.length
       offset = safeNextOffset
       hasMore = Boolean(streamResult.hasMore) && items.length > 0
+      if (hasReachedExportMessageLimit(rows.length, messageLimit)) hasMore = false
     }
 
     return {
@@ -5324,6 +5332,7 @@ class ExportService {
     if (!this.isMediaExportEnabled(options)) return []
 
     return messages.filter((msg) => {
+      if (!shouldExportMediaForMessage(msg?.createTime, options.mediaMaxAgeDays)) return false
       const localType = Number(msg?.localType || 0)
       return (localType === 3 && options.exportImages) ||
         (localType === 47 && options.exportEmojis) ||
@@ -5418,7 +5427,9 @@ class ExportService {
     allowLiteFallback = true,
     allowRangeFallback = true,
     useCursorTimeRange = true,
-    allowModeFallback = true
+    allowModeFallback = true,
+    messageLimit?: number | null,
+    mediaMaxAgeDays?: number
   ): Promise<{ rows: any[]; memberSet: Map<string, { member: ChatLabMember; avatarUrl?: string }>; firstTime: number | null; lastTime: number | null; error?: string }> {
     const rows: any[] = []
     const memberSet = new Map<string, { member: ChatLabMember; avatarUrl?: string }>()
@@ -5449,7 +5460,9 @@ class ExportService {
         normalizedSenderUsernameFilter,
         fastMediaType,
         onCollectProgress,
-        control
+        control,
+        messageLimit,
+        mediaMaxAgeDays
       )
       if (streamCollected.success) {
         usedFastMediaStream = true
@@ -5472,7 +5485,7 @@ class ExportService {
         ? await wcdbService.openMessageCursorLite(
           sessionId,
           batchSize,
-          true,
+          messageLimit ? false : true,
           beginTime,
           endTime
         )
@@ -5498,7 +5511,9 @@ class ExportService {
             false,
             allowRangeFallback,
             useCursorTimeRange,
-            allowModeFallback
+            allowModeFallback,
+            messageLimit,
+            mediaMaxAgeDays
           )
         }
         console.error(`[Export] 打开游标失败: ${cursor.error || '未知错误'}`)
@@ -5513,6 +5528,7 @@ class ExportService {
 
       try {
         let hasMore = true
+        let reachedMessageLimit = false
         let batchCount = 0
         while (hasMore) {
           this.throwIfStopRequested(control)
@@ -5619,6 +5635,8 @@ class ExportService {
             })
             if (firstTime === null || createTime < firstTime) firstTime = createTime
             if (lastTime === null || createTime > lastTime) lastTime = createTime
+            if (hasReachedExportMessageLimit(rows.length, messageLimit)) reachedMessageLimit = true
+            if (reachedMessageLimit) break
             continue
           }
 
@@ -5736,9 +5754,11 @@ class ExportService {
 
           if (firstTime === null || createTime < firstTime) firstTime = createTime
           if (lastTime === null || createTime > lastTime) lastTime = createTime
+          if (hasReachedExportMessageLimit(rows.length, messageLimit)) reachedMessageLimit = true
+          if (reachedMessageLimit) break
           }
           onCollectProgress?.({ fetched: rows.length })
-          hasMore = batch.hasMore === true
+          hasMore = batch.hasMore === true && !reachedMessageLimit
         }
         
       } catch (err) {
@@ -5767,7 +5787,9 @@ class ExportService {
         false,
         allowRangeFallback,
         useCursorTimeRange,
-        allowModeFallback
+        allowModeFallback,
+        messageLimit,
+        mediaMaxAgeDays
       )
     }
 
@@ -5785,7 +5807,9 @@ class ExportService {
         false,
         allowRangeFallback,
         useCursorTimeRange,
-        false
+        false,
+        messageLimit,
+        mediaMaxAgeDays
       )
     }
 
@@ -5803,7 +5827,9 @@ class ExportService {
         allowLiteFallback,
         false,
         false,
-        allowModeFallback
+        allowModeFallback,
+        messageLimit,
+        mediaMaxAgeDays
       )
     }
 
@@ -6434,7 +6460,13 @@ class ExportService {
         collectParams.mode,
         collectParams.targetMediaTypes,
         control,
-        collectProgressReporter
+        collectProgressReporter,
+        true,
+        true,
+        true,
+        true,
+        normalizeExportMessageLimit(options.messageLimitPerSession),
+        options.mediaMaxAgeDays
       )
       const allMessages = collected.rows
       const totalMessages = allMessages.length
@@ -6976,7 +7008,13 @@ class ExportService {
         collectParams.mode,
         collectParams.targetMediaTypes,
         control,
-        collectProgressReporter
+        collectProgressReporter,
+        true,
+        true,
+        true,
+        true,
+        normalizeExportMessageLimit(options.messageLimitPerSession),
+        options.mediaMaxAgeDays
       )
       const totalMessages = collected.rows.length
 
@@ -7719,7 +7757,13 @@ class ExportService {
         collectParams.mode,
         collectParams.targetMediaTypes,
         control,
-        collectProgressReporter
+        collectProgressReporter,
+        true,
+        true,
+        true,
+        true,
+        normalizeExportMessageLimit(options.messageLimitPerSession),
+        options.mediaMaxAgeDays
       )
       const totalMessages = collected.rows.length
 
@@ -8600,7 +8644,13 @@ class ExportService {
         collectParams.mode,
         collectParams.targetMediaTypes,
         control,
-        collectProgressReporter
+        collectProgressReporter,
+        true,
+        true,
+        true,
+        true,
+        normalizeExportMessageLimit(options.messageLimitPerSession),
+        options.mediaMaxAgeDays
       )
       const totalMessages = collected.rows.length
 
@@ -9001,7 +9051,13 @@ class ExportService {
         collectParams.mode,
         collectParams.targetMediaTypes,
         control,
-        collectProgressReporter
+        collectProgressReporter,
+        true,
+        true,
+        true,
+        true,
+        normalizeExportMessageLimit(options.messageLimitPerSession),
+        options.mediaMaxAgeDays
       )
       let totalMessages = collected.rows.length
       if (totalMessages === 0) {
@@ -9455,7 +9511,13 @@ class ExportService {
         collectParams.mode,
         collectParams.targetMediaTypes,
         control,
-        collectProgressReporter
+        collectProgressReporter,
+        true,
+        true,
+        true,
+        true,
+        normalizeExportMessageLimit(options.messageLimitPerSession),
+        options.mediaMaxAgeDays
       )
 
       // 如果没有消息,不创建文件

@@ -22,6 +22,8 @@ export interface ExportDefaultsSettingsPatch {
   voiceAsText?: boolean
   excelCompactColumns?: boolean
   concurrency?: number
+  messageLimitPerSession?: number
+  mediaMaxAgeDays?: number
 }
 
 interface ExportDefaultsSettingsFormProps {
@@ -129,11 +131,13 @@ export function ExportDefaultsSettingsForm({
   const [exportDefaultVoiceAsText, setExportDefaultVoiceAsText] = useState(false)
   const [exportDefaultExcelCompactColumns, setExportDefaultExcelCompactColumns] = useState(true)
   const [exportDefaultConcurrency, setExportDefaultConcurrency] = useState(2)
+  const [exportDefaultMessageLimit, setExportDefaultMessageLimit] = useState(0)
+  const [exportDefaultMediaMaxAgeDays, setExportDefaultMediaMaxAgeDays] = useState(0)
 
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      const [savedFormat, savedAvatars, savedDateRange, savedFileNamingMode, savedMedia, savedVoiceAsText, savedExcelCompactColumns, savedConcurrency] = await Promise.all([
+      const [savedFormat, savedAvatars, savedDateRange, savedFileNamingMode, savedMedia, savedVoiceAsText, savedExcelCompactColumns, savedConcurrency, savedMessageLimit, savedMediaMaxAgeDays] = await Promise.all([
         configService.getExportDefaultFormat(),
         configService.getExportDefaultAvatars(),
         configService.getExportDefaultDateRange(),
@@ -141,7 +145,9 @@ export function ExportDefaultsSettingsForm({
         configService.getExportDefaultMedia(),
         configService.getExportDefaultVoiceAsText(),
         configService.getExportDefaultExcelCompactColumns(),
-        configService.getExportDefaultConcurrency()
+        configService.getExportDefaultConcurrency(),
+        configService.getExportDefaultMessageLimit(),
+        configService.getExportDefaultMediaMaxAgeDays()
       ])
 
       if (cancelled) return
@@ -160,6 +166,8 @@ export function ExportDefaultsSettingsForm({
       setExportDefaultVoiceAsText(savedVoiceAsText ?? false)
       setExportDefaultExcelCompactColumns(savedExcelCompactColumns ?? true)
       setExportDefaultConcurrency(savedConcurrency ?? 2)
+      setExportDefaultMessageLimit(savedMessageLimit ?? 0)
+      setExportDefaultMediaMaxAgeDays(savedMediaMaxAgeDays ?? 0)
     })()
 
     return () => {
@@ -318,6 +326,54 @@ export function ExportDefaultsSettingsForm({
               </button>
             ))}
           </div>
+        </div>
+      </div>
+
+      <div className="form-group">
+        <div className="form-copy">
+          <label>每个客户消息上限</label>
+          <span className="form-hint">每个客户单独计算；填 0 表示导出全部消息。建议设置为 1000。</span>
+        </div>
+        <div className="form-control">
+          <input
+            className="settings-number-input"
+            type="number"
+            min={0}
+            max={1000000}
+            step={100}
+            value={exportDefaultMessageLimit}
+            onChange={async (event) => {
+              const value = Math.max(0, Math.min(1000000, Math.floor(Number(event.target.value) || 0)))
+              setExportDefaultMessageLimit(value)
+              await configService.setExportDefaultMessageLimit(value)
+              onDefaultsChanged?.({ messageLimitPerSession: value })
+              notify(value > 0 ? `已将每个客户消息上限设为 ${value} 条` : '已取消每个客户消息上限', true)
+            }}
+          />
+        </div>
+      </div>
+
+      <div className="form-group">
+        <div className="form-copy">
+          <label>媒体导出保留天数</label>
+          <span className="form-hint">只限制图片、视频、语音、表情包和文件；填 0 表示导出全部媒体。设置 365 表示最近一年。</span>
+        </div>
+        <div className="form-control">
+          <input
+            className="settings-number-input"
+            type="number"
+            min={0}
+            max={3650}
+            step={30}
+            value={exportDefaultMediaMaxAgeDays}
+            onChange={async (event) => {
+              const value = Math.max(0, Math.min(3650, Math.floor(Number(event.target.value) || 0)))
+              setExportDefaultMediaMaxAgeDays(value)
+              await configService.setExportDefaultMediaMaxAgeDays(value)
+              onDefaultsChanged?.({ mediaMaxAgeDays: value })
+              notify(value > 0 ? `媒体只导出最近 ${value} 天` : '已取消媒体时间限制', true)
+            }}
+          />
         </div>
       </div>
 

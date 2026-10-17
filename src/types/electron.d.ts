@@ -1581,6 +1581,8 @@ export interface ExportOptions {
   sessionNameWithTypePrefix?: boolean
   displayNamePreference?: 'group-nickname' | 'remark' | 'nickname'
   exportConcurrency?: number
+  messageLimitPerSession?: number
+  mediaMaxAgeDays?: number
 }
 
 export interface ExportProgress {
